@@ -76,7 +76,7 @@ ACTIVATIONS = ["ReLU", "Softplus", "Tanh", "SELU", "LeakyReLU", "PReLU", "Sigmoi
 
 POOLING = ["MaxPool1d", "AvgPool1d"]
 
-
+########################################################## blok NHITSOWy ##########################################################
 class NHITSBlock(nn.Module):
     """
     NHITS block which takes a basis function as an argument.
@@ -117,27 +117,30 @@ class NHITSBlock(nn.Module):
         assert activation in ACTIVATIONS, f"{activation} is not in {ACTIVATIONS}"
         assert pooling_mode in POOLING, f"{pooling_mode} is not in {POOLING}"
 
-        activ = getattr(nn, activation)()
-
+        
+        ############### pooling     ################
         self.pooling_layer = getattr(nn, pooling_mode)(
             kernel_size=n_pool_kernel_size, stride=n_pool_kernel_size, ceil_mode=True
         )
 
-        # Block MLPs
-        hidden_layers = [
+        ################ Block MLPs ################
+        activ = getattr(nn, activation)()
+
+        hidden_layers = [                                                                       # pierwsza warstwa liniowa (bez aktywacji)
             nn.Linear(in_features=input_size, out_features=mlp_units[0][0])
         ]
-        for layer in mlp_units:
+        for layer in mlp_units:                                                                 # kolejne warstwy liniowe z aktywacjami
             hidden_layers.append(nn.Linear(in_features=layer[0], out_features=layer[1]))
             hidden_layers.append(activ)
 
             if self.dropout_prob > 0:
                 # raise NotImplementedError('dropout')
-                hidden_layers.append(nn.Dropout(p=self.dropout_prob))
+                hidden_layers.append(nn.Dropout(p=self.dropout_prob))                               # dropout
 
-        output_layer = [nn.Linear(in_features=mlp_units[-1][1], out_features=n_theta)]
+        output_layer = [nn.Linear(in_features=mlp_units[-1][1], out_features=n_theta)]          # warstwa wyjściowa -> [B, n_theta][?]
         layers = hidden_layers + output_layer
         self.layers = nn.Sequential(*layers)
+        ################ basis ################
         self.basis = basis
 
     def forward(
@@ -150,14 +153,14 @@ class NHITSBlock(nn.Module):
 
         # Pooling
         # Pool1d needs 3D input, (B,C,L), adding C dimension
-        insample_y = insample_y.unsqueeze(1)
-        insample_y = self.pooling_layer(insample_y)
-        insample_y = insample_y.squeeze(1)
+        insample_y = insample_y.unsqueeze(1) # dodanie kanały -> [B, 1, L]
+        insample_y = self.pooling_layer(insample_y) # pooling -> [B, 1, L] -> [B, 1, L//n_pool_kernel_size]
+        insample_y = insample_y.squeeze(1) # usunięcie kanału -> [B, L//n_pool_kernel_size]
 
         # Flatten MLP inputs [B, L+H, C] -> [B, (L+H)*C]
         # Contatenate [ Y_t, | X_{t-L},..., X_{t} | F_{t-L},..., F_{t+H} | S ]
         batch_size = len(insample_y)
-        if self.hist_input_size > 0:
+        if self.hist_input_size > 0:                # tutaj historyczne egzoegniusy dołączane są do wejcia
             hist_exog = hist_exog.permute(0, 2, 1)  # [B, L, C] -> [B, C, L]
             hist_exog = self.pooling_layer(hist_exog)
             hist_exog = hist_exog.permute(0, 2, 1)  # [B, C, L] -> [B, L, C]
@@ -172,17 +175,18 @@ class NHITSBlock(nn.Module):
             insample_y = torch.cat(
                 (insample_y, futr_exog.reshape(batch_size, -1)), dim=1
             )
-
+        
         if self.stat_input_size > 0:
             insample_y = torch.cat(
                 (insample_y, stat_exog.reshape(batch_size, -1)), dim=1
             )
-
+        # w tym miejscu insample_y = insample_y + hist_exog + futr_exog + stat_exog
         # Compute local projection weights and projection
-        theta = self.layers(insample_y)
-        backcast, forecast = self.basis(theta)
+        theta = self.layers(insample_y) # MLP -> [B, n_theta][?]
+        backcast, forecast = self.basis(theta) # baza robi backcast i forecast 
         return backcast, forecast
-
+    
+####################################################################### NHITS #######################################################################
 # %% ../../nbs/models.nhits.ipynb 10
 class NHITS(BaseWindows):
     """NHITS
@@ -334,8 +338,9 @@ class NHITS(BaseWindows):
             dropout_prob_theta=dropout_prob_theta,
             activation=activation,
         )
-        self.blocks = torch.nn.ModuleList(blocks)
+        self.blocks = torch.nn.ModuleList(blocks) # lista bloków
 
+    ########### robienie stosu ###############
     def create_stack(
         self,
         h,
@@ -354,10 +359,10 @@ class NHITS(BaseWindows):
         stat_input_size,
     ):
 
-        block_list = []
+        block_list = [] # lista bloków dla wszystkich stosów
         for i in range(len(stack_types)):
             for block_id in range(n_blocks[i]):
-
+                ############ tu jest dodawany jeden blok ############
                 assert (
                     stack_types[i] == "identity"
                 ), f"Block type {stack_types[i]} not found!"
@@ -390,23 +395,25 @@ class NHITS(BaseWindows):
                 # Select type of evaluation and apply it to all layers of block
                 block_list.append(nbeats_block)
 
+                ######## koniec dodawania bloku ########
+
         return block_list
 
     def forward(self, windows_batch):
 
         # Parse windows_batch
-        insample_y = windows_batch["insample_y"]
-        insample_mask = windows_batch["insample_mask"]
-        futr_exog = windows_batch["futr_exog"]
-        hist_exog = windows_batch["hist_exog"]
-        stat_exog = windows_batch["stat_exog"]
+        insample_y = windows_batch["insample_y"] # próbki wejściowe
+        insample_mask = windows_batch["insample_mask"] # maska próbek wejściowych - zazwyczaj same jedynki
+        futr_exog = windows_batch["futr_exog"] # przyszłe dane egzogeniczne
+        hist_exog = windows_batch["hist_exog"] # hitoryczne dane egzogeniczne
+        stat_exog = windows_batch["stat_exog"] # dane statyczne
 
         # insample
-        residuals = insample_y.flip(dims=(-1,))  # backcast init
+        residuals = insample_y.flip(dims=(-1,))  # początkowe residuały to odwrócone insample_y
         insample_mask = insample_mask.flip(dims=(-1,))
 
-        forecast = insample_y[:, -1:, None]  # Level with Naive1
-        block_forecasts = [forecast.repeat(1, self.h, 1)]
+        forecast = insample_y[:, -1:, None]  # ostatnia próbka wejściowa
+        block_forecasts = [forecast.repeat(1, self.h, 1)] # pierwsza predykcja to ostatnia próbka wejściowa powtórzona h razy 
         for i, block in enumerate(self.blocks):
             backcast, block_forecast = block(
                 insample_y=residuals,
